@@ -23,7 +23,8 @@ cache, no database and no background indexer.
   newest photo first, wrapping at the ends. Photos taken in the same second fall back
   to name order, using the same `QCollator` KDE sorts with — so `IMG_9` comes before
   `IMG_10`, case is ignored, and `été` files under E rather than after Z
-- **Rotate left or right, replacing the file on disk** — losslessly for JPEG
+- **Rotate left or right, replacing the file on disk** — losslessly for JPEG, and
+  written once you move on rather than on every keypress
 - **`Delete` moves the photo to the Trash**, after a confirmation that defaults to
   Cancel — so it can be put back from the file manager
 - Follows the desktop light/dark theme, and switches **live** when you change it
@@ -40,8 +41,8 @@ cache, no database and no background indexer.
 | `Home` / `End` | First / last photo in the folder |
 | `F` / `F12` / `F11` | Toggle fullscreen |
 | `Esc` | Leave fullscreen, or close |
-| `R` / `Ctrl+R` | Rotate right, and save |
-| `L` / `Ctrl+Shift+R` | Rotate left, and save |
+| `R` / `Ctrl+R` | Rotate right |
+| `L` / `Ctrl+Shift+R` | Rotate left |
 | `Delete` | Move the photo to the Trash (asks first) |
 | `0` / `Ctrl+0` | Fit to window |
 | `1` / `Ctrl+1` | Actual size, 1:1 |
@@ -54,7 +55,13 @@ picture to pan once it is bigger than the window.
 ## Rotating
 
 `R` and `L` rewrite the file in place — that is the point of them, so there is no
-separate save step. A short message confirms it each time.
+separate save step. The write is held until you leave the photo, though: turning is
+usually a burst of keypresses on the way to the right way up, and saving each one
+would rewrite the file three times over on the way there. So the picture turns on
+screen straight away, and the file is written when you step to another photo or
+quit — once, at the angle you settled on. Turn a photo all the way round and nothing
+is written at all. If the save fails, picview names the photo it failed on: in a
+message over the next picture, or a dialog on the way out.
 
 For JPEG this is done **without decoding the image**, so no generation of quality is
 lost and rotating four times gives you back the original file byte for byte. picview
@@ -148,8 +155,8 @@ JPEG takes about 125 ms.
 ## Requirements
 
 Python 3.9+ and PyQt6. `jpegtran` (`libjpeg-turbo-progs`) is optional and only used for
-rotating JPEGs — without it, viewing still works and `R` / `L` say so rather than
-re-encoding your photo behind your back.
+rotating JPEGs — without it, viewing still works and picview says so when it comes to
+save rather than re-encoding your photo behind your back.
 
 Which formats open depends on the Qt image plugins installed; JPEG, PNG, GIF, BMP,
 WebP, TIFF and SVG come as standard. `picview` also accepts a folder and opens the

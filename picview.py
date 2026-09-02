@@ -2,8 +2,8 @@
 """picview — a minimal photo viewer.
 
 Opens a picture fitted to the window, steps through the rest of the folder with
-the arrow keys, and rotates in place — replacing the file on disk, losslessly
-for JPEG. Follows the desktop's light/dark theme.
+the arrow keys, and rotates in place — replacing the file on disk when you move
+on, losslessly for JPEG. Follows the desktop's light/dark theme.
 
 Deliberately not an editor.
 """
@@ -623,6 +623,7 @@ class Viewer(QMainWindow):
         self.settings = QSettings(APP_NAME, APP_NAME)
         self.files = []
         self.index = 0
+        self._pending = 0           # rotation shown but not yet written
         self._was_maximized = False
 
         self.canvas = Canvas()
@@ -674,27 +675,65 @@ class Viewer(QMainWindow):
     def _step(self, delta):
         if len(self.files) < 2:
             return
+        failed = self._leave()
         self.index = (self.index + delta) % len(self.files)
         self._show()
-        if self.isFullScreen():
+        self._announce(failed)
+
+    def _go(self, index):
+        if not self.files:
+            return
+        index = max(0, min(index, len(self.files) - 1))
+        if index == self.index:     # Home on the first photo: nothing to leave
+            return
+        failed = self._leave()
+        self.index = index
+        self._show()
+        self._announce(failed)
+
+    def _leave(self):
+        """Save the picture being stepped off. Returns a message, or None.
+
+        The message names the file, because by the time it is on screen the
+        photo it is about is not.
+        """
+        name = os.path.basename(self.current() or "")
+        error = self._flush()
+        return f"{name}: {error}" if error else None
+
+    def _announce(self, failed):
+        if failed:
+            self.toast.say(failed, error=True)
+        elif self.isFullScreen() and self.current():
             # No title bar up there to read the name off.
             self.toast.say(os.path.basename(self.current()))
 
-    def _go(self, index):
-        if self.files:
-            self.index = max(0, min(index, len(self.files) - 1))
-            self._show()
-
     def _rotate(self, degrees):
+        """Turn the picture on screen. The file is rewritten later, by _flush.
+
+        Rotating is usually a burst of keypresses on the way to the right way
+        up, and each one would otherwise rewrite the file — four of them for a
+        full turn that changes nothing. Holding the angle until the picture
+        leaves the screen means one write, or none.
+        """
         path = self.current()
-        if not path:
+        if not path or not self.canvas.has_picture():
             return
-        error = rotate_file(path, degrees)
-        if error:
-            self.toast.say(error, error=True)
+        if not os.access(path, os.W_OK):
+            # Say so now rather than at the far end of the folder.
+            self.toast.say("read-only file", error=True)
             return
-        self._show()
-        self.toast.say("rotated — file replaced")
+        self._pending = (self._pending + degrees) % 360
+        self.canvas.rotate(degrees)
+        self.toast.say("rotated — saved when you move on")
+
+    def _flush(self):
+        """Write any held rotation to disk. Returns None, or why it could not."""
+        degrees, self._pending = self._pending, 0
+        path = self.current()
+        if not degrees or not path:
+            return None
+        return rotate_file(path, degrees)
 
     def _delete(self):
         """Trash the picture on screen, once, after asking."""
@@ -705,6 +744,7 @@ class Viewer(QMainWindow):
         if error:
             self.toast.say(error, error=True)
             return
+        self._pending = 0           # no sense rewriting a file on its way out
         del self.files[self.index]
         # The photo that was next slides into this slot; at the end, wrap the
         # way Right does rather than stopping.
@@ -784,6 +824,17 @@ class Viewer(QMainWindow):
             self.showMaximized()
 
     def closeEvent(self, event):
+        name = os.path.basename(self.current() or "")
+        error = self._flush()
+        if error:
+            # A toast on a window that is closing is never seen, and a lost
+            # rotation should not go unmentioned. The close still goes ahead:
+            # holding the window open would not fix whatever refused the write.
+            QMessageBox.warning(
+                self, f"Not saved — {APP_NAME}",
+                f"“{name}” could not be saved rotated:\n{error}",
+            )
+
         # Store the normal-state geometry, so unmaximising later lands on the
         # last floating size rather than the screen-sized one.
         self.settings.setValue("fullscreen", self.isFullScreen())
