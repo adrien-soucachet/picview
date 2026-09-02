@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "picview"
+version = "1.0.0"
+description = "Minimal Qt photo viewer: fit by default, dark mode, lossless rotate"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6",
+]
+
+[project.urls]
+Homepage = "https://github.com/adrien-soucachet/picview"
+
+[project.scripts]
+picview = "picview:main"
+
+[tool.setuptools]
+py-modules = ["picview"]
