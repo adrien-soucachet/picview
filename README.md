@@ -30,7 +30,11 @@ cache, no database and no background indexer.
 - Follows the desktop light/dark theme, and switches **live** when you change it
 - Fullscreen on `F` / `F12`, on a near-black background whatever the theme
 - Honours the EXIF orientation, so phone photos are the right way up
-- Wheel zooms around the cursor; drag to pan when the picture is larger than the window
+- Wheel zooms around the cursor; drag to pan when the picture is larger than the window.
+  A touchpad's two-finger scroll pans rather than zooming — pinch it to zoom
+- **Pinch to zoom on a touchscreen**, about the point between your fingers; slide the
+  pair to pan at the same time, and one finger drags and double-taps like a mouse
+- **Pinch to zoom on a touchpad** as well, about the pointer
 - Remembers window size and fullscreen state between launches
 
 ## Keyboard
@@ -51,6 +55,35 @@ cache, no database and no background indexer.
 
 Double-click toggles between fit and 1:1. The wheel zooms around the pointer; drag the
 picture to pan once it is bigger than the window.
+
+## Touch and touchpad
+
+On a **touchscreen**, two fingers pinch to zoom about the point between them, and sliding
+the pair pans as you go. One finger drags and double-taps exactly as the mouse does —
+picview leaves single touches to Qt, which turns them into mouse events for it.
+
+On a **touchpad**, two fingers pinch to zoom about the pointer, and two fingers scroll
+to pan. Pinching never reaches the application as touch: the desktop recognises it and
+hands over the result already measured.
+
+Scrolling and a mouse wheel arrive as the same event, and what the event says it came
+from is no help — a plain wheel mouse reports itself as a touchpad here. The scroll
+phase does tell them apart: a touchpad brackets its scrolling with a begin and an end,
+and a wheel has no phase at all. Which matters, because one flick of two fingers is worth
+about thirteen notches of a wheel: left as a zoom it took the picture from 60% to the 5%
+floor in a single swipe.
+
+Both arrive as a running series of small changes, and in both cases the tempting reading
+of them is wrong in the same way — multiply the steps together and one pinch zooms
+several times further than the fingers asked for. So both are measured against where the
+pinch *began* rather than against the frame before, which also means the zoom is not
+sticky at 5% and 1600%: open past the limit and close again and the picture comes
+straight back with your fingers.
+
+Qt has a pinch recognizer for touchscreens, and picview does not use it: its scale factor
+measures each finger against a position that goes stale whenever the *other* finger was
+the one that moved, so a spread of exactly ×2 came out as ×6. Reading the two touch
+points and dividing one distance by another is both correct and less code.
 
 ## Rotating
 

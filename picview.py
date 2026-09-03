@@ -3,7 +3,8 @@
 
 Opens a picture fitted to the window, steps through the rest of the folder with
 the arrow keys, and rotates in place — replacing the file on disk when you move
-on, losslessly for JPEG. Follows the desktop's light/dark theme.
+on, losslessly for JPEG. Zooms with the wheel, or a two-finger pinch on a touchscreen or touchpad. Follows the
+desktop's light/dark theme.
 
 Deliberately not an editor.
 """
@@ -17,12 +18,12 @@ import tempfile
 
 try:
     from PyQt6.QtCore import (
-        QCollator, QEvent, QFile, QPointF, QRectF, QSettings, QSize, QSizeF,
-        Qt, QTimer, pyqtSignal,
+        QCollator, QEvent, QFile, QLineF, QPointF, QRectF, QSettings, QSize,
+        QSizeF, Qt, QTimer, pyqtSignal,
     )
     from PyQt6.QtGui import (
-        QAction, QColor, QGuiApplication, QImageReader, QImageWriter,
-        QKeySequence, QPainter, QPalette, QPixmap, QTransform,
+        QAction, QColor, QEventPoint, QGuiApplication, QImageReader,
+        QImageWriter, QKeySequence, QPainter, QPalette, QPixmap, QTransform,
     )
     from PyQt6.QtWidgets import (
         QApplication, QLabel, QMainWindow, QMessageBox, QWidget,
@@ -40,6 +41,9 @@ APP_NAME = "picview"
 MIN_SCALE = 0.05
 MAX_SCALE = 16.0
 ZOOM_STEP = 1.25
+# How far a notch of scrolling slides the picture, for the rare scroll
+# that says how far it turned but not what that is worth in pixels.
+SCROLL_PIXELS = 60
 # Past this the picture is drawn unsmoothed, so zooming in shows the real
 # pixels instead of an interpolated blur.
 CRISP_SCALE = 2.0
@@ -425,6 +429,13 @@ class Canvas(QWidget):
         self._origin = QPointF(0, 0)    # top-left of the picture, widget coords
         self._drag_from = None
         self._background = QColor(Qt.GlobalColor.darkGray)
+        self._touch_window = None
+        self._pinching = False
+        self._pinch_span = 0.0          # how far apart the fingers started
+        self._pinch_scale = 1.0         # the zoom they started from
+        self._pinch_centre = QPointF(0, 0)
+        self._pad_factor = None         # how far a touchpad pinch has opened
+        self._pad_scale = 1.0           # the zoom it started from
 
     # --- content -----------------------------------------------------------
 
@@ -574,7 +585,118 @@ class Canvas(QWidget):
             self._scaled_for = None
             if self._fitting:
                 self._rescale(self.fit_scale(), None)
+        if event.type() == QEvent.Type.Show:
+            self._watch_touches()
+        if event.type() == QEvent.Type.NativeGesture and self._pad_pinch(event):
+            return True
         return super().event(event)
+
+    # --- touch -------------------------------------------------------------
+    #
+    # Two fingers zoom. Qt has a pinch recognizer, but its scale factor
+    # measures each finger against a position that goes stale whenever the
+    # *other* finger was the one that moved, so a two-finger spread ends up
+    # zooming several times further than the fingers travelled. Reading the
+    # touch points and dividing one distance by another is both correct and
+    # less code.
+    #
+    # The catch is that a widget which accepts touch events stops being sent a
+    # synthesized mouse — and dragging to pan and double-tapping for 1:1 are
+    # both that mouse. So the touches are read one level up, off the window,
+    # and passed straight on untouched.
+
+    def _watch_touches(self):
+        """Start listening in on the window this widget now belongs to."""
+        window = self.window().windowHandle()
+        if window is self._touch_window:
+            return
+        if self._touch_window is not None:
+            self._touch_window.removeEventFilter(self)
+        if window is not None:
+            window.installEventFilter(self)
+        self._touch_window = window
+
+    def eventFilter(self, _window, event):
+        kind = event.type()
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate):
+            self._touched([point for point in event.points()
+                           if point.state() != QEventPoint.State.Released])
+        elif kind in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            self._touched([])
+        return False    # never swallow one: the mouse is synthesized from it
+
+    def _touched(self, points):
+        """Zoom about the midpoint of exactly two fingers, and follow them.
+
+        Moving the pair together slides the picture as well, so a pinch that
+        drifts across the panel zooms and pans in the one motion.
+        """
+        if len(points) != 2 or not self.has_picture():
+            self._pinching = False
+            return
+        first, second = (self._local(point.position()) for point in points)
+        span = QLineF(first, second).length()
+        centre = (first + second) / 2
+        if not self._pinching or self._pinch_span < 1:
+            # The opening frame — or two fingers landed on the same spot, and
+            # there is no distance yet to measure the next one against.
+            self._pinching = True
+            self._pinch_span = span
+            self._pinch_scale = self._scale
+            self._pinch_centre = centre
+            # The first finger down already looks like a mouse press; the
+            # second one arriving means it was never a drag.
+            self._drag_from = None
+            self.unsetCursor()
+            return
+        self._origin += centre - self._pinch_centre
+        self._pinch_centre = centre
+        self._fitting = False
+        # Measured against where the fingers started rather than the previous
+        # frame: a repeated frame then changes nothing, and after the zoom has
+        # run up against a limit it comes back down the moment the fingers do,
+        # instead of having to unwind an accumulated overshoot first.
+        self._rescale(self._pinch_scale * span / self._pinch_span, centre)
+
+    # --- touchpad ----------------------------------------------------------
+    #
+    # A touchpad pinch never reaches the widget as touch: the desktop reads the
+    # fingers itself and hands the application the gesture, already measured.
+
+    def _pad_pinch(self, event):
+        """Follow a pinch on the touchpad. True if the event was ours."""
+        # Zoom is the only one of these picview wants; the swipes and
+        # rotations belong to whatever else might be listening.
+        kind = event.gestureType()
+        if kind == Qt.NativeGestureType.BeginNativeGesture:
+            self._begin_pad_pinch()
+            return False
+        if kind == Qt.NativeGestureType.EndNativeGesture:
+            self._pad_factor = None
+            return False
+        if kind != Qt.NativeGestureType.ZoomNativeGesture or not self.has_picture():
+            return False
+        if self._pad_factor is None:
+            self._begin_pad_pinch()
+        # Each value is a step of how far the fingers have opened *since the
+        # pinch began*, not a factor to multiply by: adding them up gives the
+        # spread, whereas multiplying them compounds into several times the
+        # zoom the fingers asked for.
+        self._pad_factor = max(self._pad_factor + event.value(), MIN_SCALE)
+        self._fitting = False
+        # The position on one of these is measured from the window, not from
+        # this widget.
+        self._rescale(self._pad_scale * self._pad_factor,
+                      self._local(event.position()))
+        return True
+
+    def _begin_pad_pinch(self):
+        self._pad_factor = 1.0
+        self._pad_scale = self._scale
+
+    def _local(self, point):
+        """A position measured from the window, in the coordinates zoom uses."""
+        return QPointF(self.mapFrom(self.window(), point.toPoint()))
 
     # --- mouse -------------------------------------------------------------
 
@@ -586,12 +708,14 @@ class Canvas(QWidget):
             self.fit()
 
     def mousePressEvent(self, event):
+        if self._pinching:
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._pannable():
             self._drag_from = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
     def mouseMoveEvent(self, event):
-        if self._drag_from is None:
+        if self._drag_from is None or self._pinching:
             return
         self._origin += event.position() - self._drag_from
         self._drag_from = event.position()
@@ -603,11 +727,38 @@ class Canvas(QWidget):
         self.unsetCursor()
 
     def wheelEvent(self, event):
+        """A wheel zooms; a touchpad's two fingers scroll the picture instead.
+
+        The two arrive as the same event, and the device it claims to come from
+        is no help — a plain wheel mouse reports itself as a touchpad here. The
+        scroll phase does tell them apart: a touchpad brackets its scrolling
+        with a begin and an end, and a wheel has no phase at all.
+        """
+        if not self.has_picture():
+            return
+        if event.phase() != Qt.ScrollPhase.NoScrollPhase:
+            self._scroll(event)
+            event.accept()
+            return
         steps = event.angleDelta().y() / 120
-        if not self.has_picture() or not steps:
+        if not steps:
             return
         self.zoom_by(ZOOM_STEP ** steps, event.position())
         event.accept()
+
+    def _scroll(self, event):
+        """Slide the picture under a touchpad scroll, the way a drag would."""
+        delta = QPointF(event.pixelDelta())
+        if delta.isNull():
+            # No pixel figure offered — a notch's worth of angle instead. The
+            # events that open and close a scroll carry neither, and adding
+            # nothing at all is exactly right for those.
+            delta = QPointF(event.angleDelta()) * SCROLL_PIXELS / 120
+        # Qt has already applied whichever scrolling direction the desktop is
+        # set to, so following the delta follows the setting.
+        self._origin += delta
+        self._clamp()
+        self.update()
 
     def resizeEvent(self, event):
         if self._fitting:
