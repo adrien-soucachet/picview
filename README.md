@@ -48,6 +48,7 @@ cache, no database and no background indexer.
 | `R` / `Ctrl+R` | Rotate right |
 | `L` / `Ctrl+Shift+R` | Rotate left |
 | `Delete` | Move the photo to the Trash (asks first) |
+| `Ctrl+C` | Copy the photo's path to the clipboard |
 | `0` / `Ctrl+0` | Fit to window |
 | `1` / `Ctrl+1` | Actual size, 1:1 |
 | `+` / `-` | Zoom in / out |

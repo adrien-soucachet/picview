@@ -922,6 +922,14 @@ class Viewer(QMainWindow):
         box.button(QMessageBox.StandardButton.No).setText("Cancel")
         return box.exec() == QMessageBox.StandardButton.Yes
 
+    def _copy_path(self):
+        """Put the path of the photo on screen on the clipboard."""
+        path = self.current()
+        if not path:
+            return
+        QGuiApplication.clipboard().setText(path)
+        self.toast.say("path copied")
+
     def _update_title(self):
         path = self.current()
         if not path:
@@ -1020,6 +1028,8 @@ class Viewer(QMainWindow):
         add("Ctrl+Shift+R", lambda: self._rotate(-90))
 
         add("Delete", self._delete)
+
+        add(QKeySequence.StandardKey.Copy, self._copy_path)
 
         add("0", self.canvas.fit)
         add("Ctrl+0", self.canvas.fit)
