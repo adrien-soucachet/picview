@@ -458,6 +458,10 @@ class Canvas(QWidget):
     def has_picture(self):
         return not self._pixmap.isNull()
 
+    def picture(self):
+        """The picture at full size, as it looks on screen."""
+        return self._pixmap
+
     def picture_size(self):
         return self._pixmap.size() if self.has_picture() else QSize()
 
@@ -930,6 +934,17 @@ class Viewer(QMainWindow):
         QGuiApplication.clipboard().setText(path)
         self.toast.say("path copied")
 
+    def _copy_image(self):
+        """Put the photo itself on the clipboard, to paste into another app.
+
+        This is the picture on screen, so a rotation still waiting to be
+        written is part of what gets copied.
+        """
+        if not self.canvas.has_picture():
+            return
+        QGuiApplication.clipboard().setImage(self.canvas.picture().toImage())
+        self.toast.say("photo copied")
+
     def _update_title(self):
         path = self.current()
         if not path:
@@ -1030,6 +1045,7 @@ class Viewer(QMainWindow):
         add("Delete", self._delete)
 
         add(QKeySequence.StandardKey.Copy, self._copy_path)
+        add("Ctrl+Shift+C", self._copy_image)
 
         add("0", self.canvas.fit)
         add("Ctrl+0", self.canvas.fit)
