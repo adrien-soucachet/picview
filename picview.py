@@ -1080,6 +1080,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
 
+    # Qt refuses any picture whose decoded pixels pass 256 MB, a guard against
+    # decompression bombs arriving from the web. Nothing arrives here: picview
+    # decodes the file you pointed it at, and a full-page browser capture is
+    # routinely taller than that cap allows.
+    QImageReader.setAllocationLimit(0)
+
     # The image plugins are only loaded once QApplication exists, so the list
     # of readable formats is not trustworthy before this point.
     target = os.path.abspath(args[0])
