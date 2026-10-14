@@ -15,14 +15,16 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 
 try:
     from PyQt6.QtCore import (
-        QCollator, QEvent, QFile, QLineF, QPointF, QRectF, QSettings, QSize,
-        QSizeF, Qt, QTimer, pyqtSignal,
+        QBuffer, QByteArray, QCollator, QEvent, QFile, QIODevice, QLineF,
+        QObject, QPointF, QRectF, QSettings, QSize, QSizeF, Qt, QTimer,
+        pyqtSignal,
     )
     from PyQt6.QtGui import (
-        QAction, QColor, QEventPoint, QGuiApplication, QImageReader,
+        QAction, QColor, QEventPoint, QGuiApplication, QImage, QImageReader,
         QImageWriter, QKeySequence, QPainter, QPalette, QPixmap, QTransform,
     )
     from PyQt6.QtWidgets import (
@@ -48,6 +50,11 @@ SCROLL_PIXELS = 60
 # pixels instead of an interpolated blur.
 CRISP_SCALE = 2.0
 TOAST_MS = 1800
+# A photo that takes longer than this to arrive gets a progress bar. Most
+# never do, and a bar flashing up for a moment is worse than none.
+SLOW_MS = 500
+# Bytes read per step off a slow disk or share, and so per progress update.
+READ_CHUNK = 1 << 20
 # Neutral near-black behind a fullscreen picture, whatever the desktop theme:
 # a bright surround washes out everything shown against it.
 FULLSCREEN_BG = QColor("#101010")
@@ -376,6 +383,73 @@ def delete_file(path):
     return handle.errorString() or "cannot move this file to the Trash"
 
 
+# --- loading ---------------------------------------------------------------
+
+class Load:
+    """One photo being read off disk and decoded, on a thread of its own."""
+
+    def __init__(self, path):
+        self.path = path
+        self.done = 0               # bytes read so far
+        self.total = 0              # file size, once known
+        self.cancelled = threading.Event()
+
+
+class Loader(QObject):
+    """Reads and decodes photos away from the UI thread.
+
+    Over a network share a photo can take seconds to arrive, and decoding it
+    where the window lives would freeze every key — even the one to skip it.
+    Results come back as signals, which Qt delivers on the UI thread.
+    """
+
+    progress = pyqtSignal(object)           # Load
+    finished = pyqtSignal(object, object, str)  # Load, QImage, error
+
+    def start(self, path):
+        load = Load(path)
+        threading.Thread(target=self._run, args=(load,), daemon=True).start()
+        return load
+
+    def _run(self, load):
+        try:
+            image, error = self._read(load)
+            if not load.cancelled.is_set():
+                self.finished.emit(load, image, error)
+        except RuntimeError:
+            pass                    # the window closed under us
+
+    def _read(self, load):
+        chunks = []
+        try:
+            with open(load.path, "rb") as handle:
+                load.total = os.fstat(handle.fileno()).st_size
+                while chunk := handle.read(READ_CHUNK):
+                    if load.cancelled.is_set():
+                        return QImage(), ""
+                    chunks.append(chunk)
+                    load.done += len(chunk)
+                    self.progress.emit(load)
+        except OSError as exc:
+            return QImage(), exc.strerror or str(exc)
+        buffer = QBuffer()
+        buffer.setData(QByteArray(b"".join(chunks)))
+        del chunks
+        buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        # The extension is only a hint: Qt still sniffs the content if it lies.
+        suffix = os.path.splitext(load.path)[1][1:].lower().encode()
+        reader = QImageReader(buffer, suffix)
+        reader.setAutoTransform(True)       # honour the EXIF orientation
+        image = reader.read()
+        return image, "" if not image.isNull() else (
+            reader.errorString() or "cannot open"
+        )
+
+
+def _megabytes(count):
+    return f"{count / 1e6:.1f}"
+
+
 # --- widgets ---------------------------------------------------------------
 
 class Toast(QLabel):
@@ -411,6 +485,72 @@ class Toast(QLabel):
 
     def _place(self):
         self.move(18, self.parent().height() - self.height() - 18)
+
+
+class Progress(QWidget):
+    """A photo still on its way: its name, how much has arrived, and a bar."""
+
+    WIDTH = 320
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+        self._name = ""
+        self._status = ""
+        self._fraction = 0.0
+        parent.installEventFilter(self)
+
+    def report(self, load):
+        self._name = os.path.basename(load.path)
+        if load.total and load.done >= load.total:
+            self._status, self._fraction = "decoding…", 1.0
+        elif load.total:
+            self._status = f"{_megabytes(load.done)} / {_megabytes(load.total)} MB"
+            self._fraction = load.done / load.total
+        else:
+            self._status, self._fraction = "opening…", 0.0
+        self.resize(self.WIDTH, self.fontMetrics().height() * 2 + 40)
+        self._place()
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 190))
+        painter.drawRoundedRect(QRectF(self.rect()), 8, 8)
+
+        line = self.fontMetrics().height()
+        text = self.rect().adjusted(14, 10, -14, 0)
+        painter.setPen(QColor("#ffffff"))
+        name = self.fontMetrics().elidedText(
+            self._name, Qt.TextElideMode.ElideMiddle, text.width()
+        )
+        painter.drawText(text.x(), text.y() + self.fontMetrics().ascent(), name)
+        painter.setPen(QColor("#bbbbbb"))
+        painter.drawText(
+            text.x(), text.y() + line + self.fontMetrics().ascent(), self._status
+        )
+
+        track = QRectF(text.x(), self.height() - 14, text.width(), 4)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 60))
+        painter.drawRoundedRect(track, 2, 2)
+        painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(
+            QRectF(track.x(), track.y(), track.width() * self._fraction, 4), 2, 2
+        )
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            self._place()
+        return False
+
+    def _place(self):
+        parent = self.parent()
+        self.move((parent.width() - self.width()) // 2,
+                  (parent.height() - self.height()) // 2)
 
 
 class Canvas(QWidget):
@@ -780,11 +920,24 @@ class Viewer(QMainWindow):
         self.index = 0
         self._pending = 0           # rotation shown but not yet written
         self._was_maximized = False
+        self._direction = 1         # which way the next photo probably is
+        self._loading = None        # the Load for the photo on screen, if any
+        self._preloading = None     # the Load for the photo after it
+        self._preloaded = None      # (path, QImage) that arrived ahead of time
 
         self.canvas = Canvas()
         self.canvas.scale_changed.connect(self._update_title)
         self.setCentralWidget(self.canvas)
         self.toast = Toast(self.canvas)
+        self.progress = Progress(self.canvas)
+
+        self.loader = Loader(self)
+        self.loader.progress.connect(self._progressed)
+        self.loader.finished.connect(self._loaded)
+        self._slow = QTimer(self)
+        self._slow.setSingleShot(True)
+        self._slow.setInterval(SLOW_MS)
+        self._slow.timeout.connect(self._show_progress)
 
         self._scan(path)
         self._show()
@@ -809,27 +962,97 @@ class Viewer(QMainWindow):
         self.index = self.files.index(path) if path in self.files else 0
 
     def _show(self):
+        """Put the current photo on screen — at once if it is already here.
+
+        The previous photo stays up while the next one loads, so a quick load
+        swaps cleanly; only one slower than SLOW_MS clears it for a progress
+        bar.
+        """
         path = self.current()
+        self._cancel(self._loading)
+        self._loading = None
+        self._slow.stop()
+        self.progress.hide()
         if path is None:            # the last picture was just deleted
+            self._cancel(self._preloading)
+            self._preloading = self._preloaded = None
             self.canvas.set_pixmap(QPixmap())
             self._update_title()
             return
-        reader = QImageReader(path)
-        reader.setAutoTransform(True)       # honour the EXIF orientation
-        image = reader.read()
-        if image.isNull():
+
+        preloaded, self._preloaded = self._preloaded, None
+        if preloaded and preloaded[0] == path:
+            self._display(path, preloaded[1], "")
+            return
+        if self._preloading and self._preloading.path == path:
+            # Already on its way: take it over rather than start again.
+            self._loading, self._preloading = self._preloading, None
+        else:
+            # Whatever was being fetched ahead is not wanted now, and it would
+            # share a slow link with the photo that is.
+            self._cancel(self._preloading)
+            self._preloading = None
+            self._loading = self.loader.start(path)
+        self._slow.start()
+        self._update_title()
+
+    @staticmethod
+    def _cancel(load):
+        if load:
+            load.cancelled.set()
+
+    def _progressed(self, load):
+        if load is self._loading and self.progress.isVisible():
+            self.progress.report(load)
+
+    def _show_progress(self):
+        if not self._loading:
+            return
+        # Long enough that the old photo would pass for the new one.
+        self.canvas.set_pixmap(QPixmap())
+        self.progress.report(self._loading)
+        self.progress.show()
+        self.progress.raise_()
+        self._update_title()
+
+    def _loaded(self, load, image, error):
+        if load is self._loading:
+            self._loading = None
+            self._slow.stop()
+            self.progress.hide()
+            self._display(load.path, image, error)
+        elif load is self._preloading:
+            self._preloading = None
+            if not error:
+                self._preloaded = (load.path, image)
+
+    def _display(self, path, image, error):
+        if error:
             self.canvas.set_pixmap(QPixmap())
-            self.toast.say(
-                f"{os.path.basename(path)}: {reader.errorString() or 'cannot open'}",
-                error=True,
-            )
+            self.toast.say(f"{os.path.basename(path)}: {error}", error=True)
         else:
             self.canvas.set_pixmap(QPixmap.fromImage(image))
         self._update_title()
+        self._preload()
+
+    def _preload(self):
+        """Fetch the photo you will most likely ask for next, while you look."""
+        if len(self.files) < 2:
+            return
+        path = self.files[(self.index + self._direction) % len(self.files)]
+        if path == self.current():
+            return
+        if self._preloaded and self._preloaded[0] == path:
+            return
+        if self._preloading and self._preloading.path == path:
+            return
+        self._cancel(self._preloading)
+        self._preloading = self.loader.start(path)
 
     def _step(self, delta):
         if len(self.files) < 2:
             return
+        self._direction = 1 if delta > 0 else -1
         failed = self._leave()
         self.index = (self.index + delta) % len(self.files)
         self._show()
@@ -842,6 +1065,8 @@ class Viewer(QMainWindow):
         if index == self.index:     # Home on the first photo: nothing to leave
             return
         failed = self._leave()
+        # After Home the next key is →, after End it is ←.
+        self._direction = 1 if index < self.index else -1
         self.index = index
         self._show()
         self._announce(failed)
@@ -872,7 +1097,7 @@ class Viewer(QMainWindow):
         leaves the screen means one write, or none.
         """
         path = self.current()
-        if not path or not self.canvas.has_picture():
+        if not path or self._loading or not self.canvas.has_picture():
             return
         if not os.access(path, os.W_OK):
             # Say so now rather than at the far end of the folder.
@@ -893,7 +1118,8 @@ class Viewer(QMainWindow):
     def _delete(self):
         """Trash the picture on screen, once, after asking."""
         path = self.current()
-        if not path or not self._confirm_delete(path):
+        # Until it arrives the photo on screen is the last one, not this.
+        if not path or self._loading or not self._confirm_delete(path):
             return
         error = delete_file(path)
         if error:
@@ -940,7 +1166,7 @@ class Viewer(QMainWindow):
         This is the picture on screen, so a rotation still waiting to be
         written is part of what gets copied.
         """
-        if not self.canvas.has_picture():
+        if self._loading or not self.canvas.has_picture():
             return
         QGuiApplication.clipboard().setImage(self.canvas.picture().toImage())
         self.toast.say("photo copied")
@@ -954,7 +1180,9 @@ class Viewer(QMainWindow):
         if len(self.files) > 1:
             parts.append(f"{self.index + 1}/{len(self.files)}")
         size = self.canvas.picture_size()
-        if not size.isEmpty():
+        if self._loading:
+            parts.append("loading…")    # the size on screen is the last photo's
+        elif not size.isEmpty():
             parts.append(f"{size.width()}×{size.height()}")
             parts.append(f"{round(self.canvas.scale * 100)}%")
         self.setWindowTitle(" · ".join(parts) + f" — {APP_NAME}")
@@ -998,6 +1226,8 @@ class Viewer(QMainWindow):
             self.showMaximized()
 
     def closeEvent(self, event):
+        self._cancel(self._loading)
+        self._cancel(self._preloading)
         name = os.path.basename(self.current() or "")
         error = self._flush()
         if error:

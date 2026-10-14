@@ -35,6 +35,10 @@ cache, no database and no background indexer.
 - **Pinch to zoom on a touchscreen**, about the point between your fingers; slide the
   pair to pan at the same time, and one finger drags and double-taps like a mouse
 - **Pinch to zoom on a touchpad** as well, about the pointer
+- **Loads in the background, and fetches the next photo while you look.** Stepping at
+  viewing pace on a network mount usually finds the photo already there; one that takes
+  longer than half a second shows its name, how many MB have arrived, and a progress
+  bar — and the keys keep working, so you can skip it without waiting
 - Remembers window size and fullscreen state between launches
 
 ## Keyboard
@@ -176,14 +180,15 @@ mount, and on a synthetic folder of 14,950:
 |---|---|---|
 | Scan the folder | 160 ms cold, 21 ms warm | 56 ms |
 | Cold start to first photo | 76 ms | 87 ms |
-| Next photo (12 MP JPEG) | ~300 ms, network-bound | 40 ms |
+| Next photo (12 MP JPEG) | ~300 ms, network-bound; instant once preloaded | 40 ms |
 | Jump to first / last | 40 ms | 37 ms |
 | Memory, at rest | 165 MB | 128 MB |
 
 Timestamps come from `scandir`, which carries them along with the directory listing
 rather than making a second call per file — on the network mount that is 21 ms instead
-of 120 ms. Memory is flat over hundreds of photos: one picture is held at a time, plus one
-pre-scaled copy at the size it is being shown. There is no thumbnail cache and no
+of 120 ms. Memory is flat over hundreds of photos: the picture on screen and the next one are
+held, plus one pre-scaled copy at the size it is being shown (the memory figures above
+were measured before preloading, with one). There is no thumbnail cache and no
 index, which is why startup does not care how large the folder is. Rotating a 12 MP
 JPEG takes about 125 ms.
 
@@ -210,8 +215,9 @@ Deliberate omissions — it is a viewer:
   to sort by name or oldest-first from inside picview
 - the folder is listed once, at startup — pictures added while it is open do not appear
   until you reopen
-- **no preloading.** The next photo is decoded when you ask for it, so on a network
-  mount holding the arrow key down moves as fast as the files arrive
+- **one photo ahead, in one direction.** picview fetches the next photo the way you are
+  stepping, so holding the arrow key down on a network mount still moves only as fast
+  as the files arrive
 - **window position is not restored** between launches. Wayland does not let an
   application place its own window — size and fullscreen state do come back
 
